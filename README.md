@@ -1,92 +1,132 @@
-# ClawLink Visual GUI
+# visual-clawlink
 
-A commercial-grade web interface for the ClawLink agent management system. Built with modern dark theme aesthetics inspired by Linear, Cursor AI, and TRAE editor.
+Standalone Web GUI for end users on local PC, connecting to ClawLink Router.
 
-## Features
+## Deployment Role
 
-- **Solo Mode**: One-on-one conversations with individual agents
-- **Group Mode**: Multi-agent topic-based discussions with @mention support
-- **Teaching Controls**: Configure teaching mode, strictness level, and export memory
-- **Score Tracking**: Real-time SVG gauge, rubric breakdown, iteration counter
-- **File Locks**: View and manage file locks across agents
-- **Memory Browser**: Search and browse agent memories
-- **Pairing System**: Connect agents via pairing codes (XXXX-XXXX format)
-- **Queue Indicator**: Visual feedback when messages are queued
-- **WebSocket**: Real-time messaging with auto-reconnect
+Use this module when you need a browser-based control panel for:
 
-## Quick Start
+1. agent pairing and list view
+2. solo/group chat interaction
+3. strictness and score visibility
+4. queue and lock observation
 
-### Prerequisites
+## Independent Runtime Contract
 
-- Python 3.10+
-- A running ClawLink Router (default: `http://localhost:8420`)
+This GUI has one required external dependency: Router endpoint.
 
-### Install
+- Input dependency: `ROUTER_URL`
+- Local service port: `PORT` (default `8421`)
+- No router IP is hardcoded in source
+- Browser only talks to this GUI service; GUI proxies to Router
 
-```bash
-pip install aiohttp
-```
-
-Or using the project file:
+## Install
 
 ```bash
-pip install .
+cd visual-clawlink
+pip install -e .
 ```
 
-### Run
+## Run
 
 ```bash
 python server.py
 ```
 
-The GUI will be available at `http://localhost:8421`.
+Open `http://localhost:8421`.
 
-### Configuration
+## Configuration
 
-| Environment Variable | Default                  | Description            |
-|----------------------|--------------------------|------------------------|
-| `ROUTER_URL`         | `http://localhost:8420`  | ClawLink Router URL    |
-| `PORT`               | `8421`                   | GUI server port        |
+| Environment Variable | Default | Description |
+|---|---|---|
+| `ROUTER_URL` | `http://localhost:8420` | Router base URL |
+| `PORT` | `8421` | GUI listen port |
 
-## Architecture
+Example:
 
-```
-visual-clawlink/
-  server.py              # aiohttp server (static files + API/WS proxy)
-  pyproject.toml         # Python project metadata
-  templates/
-    index.html           # Main HTML template
-  static/
-    css/
-      style.css          # Dark theme stylesheet
-    js/
-      app.js             # Application logic (OOP, modular classes)
+```bash
+ROUTER_URL=http://10.0.0.12:8420 PORT=8421 python server.py
 ```
 
-### JavaScript Classes
+## Runtime Topology
 
-| Class                  | Responsibility                                      |
-|------------------------|-----------------------------------------------------|
-| `RouterAPI`            | REST calls to router via /api/ proxy                |
-| `WSManager`            | WebSocket with auto-reconnect and event emitter     |
-| `ChatRenderer`         | Message rendering, bubbles, score cards, queue       |
-| `ConversationManager`  | Multi-conversation state, tab reordering             |
-| `AgentPanel`           | Left sidebar conversation tabs                       |
-| `GroupChatManager`     | Group topics, @mention autocomplete, filtering       |
-| `ScoringPanel`         | SVG gauge, rubric bars, iteration display            |
-| `FileLockViewer`       | Lock list and release controls                       |
-| `StrictnessControl`    | Range slider with debounced save                     |
-| `PairingDialog`        | Modal with auto-formatted code input                 |
-| `App`                  | Main controller, event wiring, lifecycle             |
+```text
+Browser -> visual-clawlink (8421) -> Router (configured by ROUTER_URL)
+```
 
-## Usage
+## Routes In This Service
 
-1. Start the ClawLink Router
-2. Start this GUI server
-3. Open `http://localhost:8421` in your browser
-4. Click "New Conversation" and enter an agent pairing code
-5. Start chatting, teaching, and scoring
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | serve UI page |
+| * | `/api/{path:.*}` | proxy HTTP requests to Router |
+| GET | `/ws/{path:.*}` | proxy WebSocket requests to Router |
+| GET | `/static/*` | static assets |
+
+## Anti-Hardcoding Checklist
+
+- Never hardcode router host in frontend code.
+- Change backend target only through `ROUTER_URL`.
+- Keep GUI port configurable for local conflicts.
 
 ## License
 
-Part of the ClawLink project.
+Part of ClawLink project (MIT).
+
+---
+
+## 中文说明
+
+visual-clawlink 是面向终端用户的独立 Web 可视化界面，通常部署在用户 PC 上，并连接 ClawLink Router。
+
+### 组件职责
+
+用于提供：
+
+1. Agent 配对与列表展示
+2. 单聊 / 群聊交互
+3. strictness 与评分可视化
+4. 队列与锁状态观察
+
+### 独立运行契约
+
+本 GUI 只依赖一个外部输入：Router 地址。
+
+- 依赖项：`ROUTER_URL`
+- 本地端口：`PORT`（默认 `8421`）
+- 源码中不写死 Router IP
+- 浏览器只连接 GUI，GUI 负责代理到 Router
+
+### 安装
+
+```bash
+cd visual-clawlink
+pip install -e .
+```
+
+### 运行
+
+```bash
+python server.py
+```
+
+访问：`http://localhost:8421`
+
+### 配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `ROUTER_URL` | `http://localhost:8420` | Router 地址 |
+| `PORT` | `8421` | GUI 监听端口 |
+
+示例：
+
+```bash
+ROUTER_URL=http://10.0.0.12:8420 PORT=8421 python server.py
+```
+
+### 防硬编码清单
+
+- 前端和服务端均不写死 Router 地址。
+- 仅通过 `ROUTER_URL` 改变后端目标。
+- GUI 端口可配置，避免本机冲突。
