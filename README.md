@@ -63,6 +63,28 @@ Browser -> visual-clawlink (8421) -> Router (configured by ROUTER_URL)
 | GET | `/ws/{path:.*}` | proxy WebSocket requests to Router |
 | GET | `/static/*` | static assets |
 
+## Extracted Essentials From Global Docs
+
+### UI-to-System Topology
+
+```text
+User -> Browser UI -> visual-clawlink proxy -> Router -> Agent nodes
+```
+
+### Real-Time Event Expectations
+
+The GUI should be prepared to render these categories of router events:
+
+- agent online/offline updates
+- session lifecycle updates
+- new message and queue updates
+- score/strictness updates
+- lock acquisition/release updates
+
+### Group Mention Behavior
+
+In group chat, only mentioned agents are expected to respond immediately; other agents may ignore unless addressed.
+
 ## Anti-Hardcoding Checklist
 
 - Never hardcode router host in frontend code.
@@ -124,6 +146,28 @@ python server.py
 ```bash
 ROUTER_URL=http://10.0.0.12:8420 PORT=8421 python server.py
 ```
+
+### 从全局 docs 提炼的界面交互要点
+
+#### 系统拓扑
+
+```text
+用户 -> 浏览器界面 -> visual-clawlink 代理 -> Router -> 各 Agent 节点
+```
+
+#### 实时事件渲染要求
+
+GUI 需要覆盖以下事件类型：
+
+- Agent 上下线
+- Session 生命周期变化
+- 消息与队列更新
+- 评分和 strictness 更新
+- 文件锁加锁/解锁更新
+
+#### 群聊 @mention 规则
+
+群聊中，被 @ 的 Agent 应优先响应；未被 @ 的 Agent 可以不立即响应。
 
 ### 防硬编码清单
 
