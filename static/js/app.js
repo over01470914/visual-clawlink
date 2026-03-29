@@ -34,23 +34,98 @@ class RouterAPI {
 
   agents()            { return this._request('GET', '/agents'); }
   sessions()          { return this._request('GET', '/sessions'); }
-  messages(sid)       { return this._request('GET', `/sessions/${sid}/messages`); }
-  sendMessage(sid, d) { return this._request('POST', `/sessions/${sid}/messages`, d); }
-  teach(sid, d)       { return this._request('POST', `/sessions/${sid}/teach`, d); }
-  setStrictness(sid,v){ return this._request('PUT', `/sessions/${sid}/strictness`, { value: v }); }
+  async messages(sid) {
+    const session = await this._request('GET', `/sessions/${sid}`);
+    return session?.messages || [];
+  }
+  sendMessage(sid, d) { return this._request('POST', `/sessions/${sid}/message`, d); }
+  teach(sid)          { return this._request('POST', `/sessions/${sid}/teach`); }
+  setStrictness(sid,v){ return this._request('PUT', `/sessions/${sid}/strictness`, { strictness: v }); }
   locks()             { return this._request('GET', '/locks'); }
-  acquireLock(d)      { return this._request('POST', '/locks', d); }
-  releaseLock(id)     { return this._request('DELETE', `/locks/${id}`); }
-  heartbeat()         { return this._request('GET', '/heartbeat'); }
-  pair(code)          { return this._request('POST', '/pair', { code }); }
-  topics()            { return this._request('GET', '/topics'); }
-  createTopic(d)      { return this._request('POST', '/topics', d); }
-  topicMessages(tid)  { return this._request('GET', `/topics/${tid}/messages`); }
-  sendTopicMsg(tid,d) { return this._request('POST', `/topics/${tid}/messages`, d); }
+  acquireLock(d)      { return this._request('POST', '/locks/acquire', d); }
+  releaseLock(d)      { return this._request('POST', '/locks/release', d); }
+  heartbeat()         { return this._request('GET', '/health'); }
+  async pair(code) {
+    const validated = await this._request('POST', '/pair/validate', { code });
+    const agentId = validated?.agent_id || validated?.metadata?.agent_id;
+    const endpoint = validated?.agent_endpoint || validated?.endpoint || validated?.metadata?.agent_endpoint;
+    if (!agentId || !endpoint) return validated;
+    return this.registerAgent({
+      agent_id: agentId,
+      display_name: validated?.display_name || agentId,
+      endpoint,
+      agent_type: validated?.agent_type || 'openclaw',
+      avatar_color: validated?.avatar_color || '#5865F2',
+      metadata: validated?.metadata || {},
+    });
+  }
+  registerAgent(d)    { return this._request('POST', '/agents/register', d); }
+  createSession(d)    { return this._request('POST', '/sessions', d); }
+  topics(sid)         { return this._request('GET', `/sessions/${sid}/topics`); }
+  createTopic(sid,d)  { return this._request('POST', `/sessions/${sid}/topics`, d); }
+  topicMessages(sid, tid)  { return this._request('GET', `/sessions/${sid}/topics/${tid}/messages`); }
+  sendTopicMsg(sid, tid,d) { return this._request('POST', `/sessions/${sid}/message`, { content: d.content, mentions: d.mentions || [] }); }
   queue(sid)          { return this._request('GET', `/sessions/${sid}/queue`); }
   memories(sid)       { return this._request('GET', `/sessions/${sid}/memories`); }
   exportMemory(sid)   { return this._request('GET', `/sessions/${sid}/memories/export`); }
   score(sid)          { return this._request('GET', `/sessions/${sid}/score`); }
+  async logs(limit = 200) {
+    const res = await fetch(`/logs?limit=${encodeURIComponent(limit)}`);
+    if (!res.ok) {
+      throw new Error(await res.text());
+    }
+    return res.json();
+  }
+
+  async probeHealth(target) {
+    const cleanTarget = (target || '').trim().replace(/\/$/, '');
+    if (!cleanTarget) {
+      throw new Error('invalid target');
+    }
+
+    // Prefer direct probe so browser network panel shows real target (e.g. :18420)
+    const directUrl = `${cleanTarget}/health`;
+    try {
+      const directRes = await fetch(directUrl, { method: 'GET' });
+      const directText = await directRes.text();
+      return {
+        ok: directRes.ok,
+        status: directRes.status,
+        target: cleanTarget,
+        health_url: directUrl,
+        body: directText.slice(0, 200),
+        source: 'direct',
+      };
+    } catch {
+      // Fallback to backend probe (avoids CORS/network limitations)
+      const res = await fetch(`/probe/health?target=${encodeURIComponent(cleanTarget)}`);
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
+      const data = await res.json();
+      return { ...data, source: 'proxy' };
+    }
+  }
+
+  async setRouterUrl(url) {
+    const res = await fetch('/config/router', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ router_url: url }),
+    });
+    if (!res.ok) {
+      throw new Error(await res.text());
+    }
+    return res.json();
+  }
+
+  async getRouterUrl() {
+    const res = await fetch('/config/router');
+    if (!res.ok) {
+      throw new Error(await res.text());
+    }
+    return res.json();
+  }
 }
 
 /* ----------------------------------------------------------
@@ -70,7 +145,7 @@ class WSManager {
   connect(sessionId) {
     this.disconnect();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this._url = `${proto}://${location.host}/ws/sessions/${sessionId}`;
+    this._url = `${proto}://${location.host}/ws/ws/${sessionId}`;
     this._shouldReconnect = true;
     this._doConnect();
   }
@@ -548,26 +623,28 @@ class FileLockViewer {
     this.container.innerHTML = '';
     locks.forEach(lock => {
       const el = document.createElement('div');
+      const filePath = lock.file_path || lock.path || lock.file || '';
+      const lockOwner = lock.locked_by || lock.owner || lock.agent || '';
       el.className = 'lock-item';
       el.innerHTML = `
         <div class="lock-item__icon">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         </div>
         <div class="lock-item__info">
-          <div class="lock-item__path">${this._escape(lock.path || lock.file)}</div>
-          <div class="lock-item__owner">${this._escape(lock.owner || lock.agent || 'Unknown')}</div>
+          <div class="lock-item__path">${this._escape(filePath)}</div>
+          <div class="lock-item__owner">${this._escape(lockOwner || 'Unknown')}</div>
         </div>
-        <button class="lock-item__release" data-lock-id="${lock.id || ''}">Release</button>`;
+        <button class="lock-item__release">Release</button>`;
       const releaseBtn = el.querySelector('.lock-item__release');
-      releaseBtn.addEventListener('click', () => this._release(lock.id));
+      releaseBtn.addEventListener('click', () => this._release(filePath, lockOwner));
       this.container.appendChild(el);
     });
   }
 
-  async _release(lockId) {
-    if (!lockId) return;
+  async _release(filePath, agentId) {
+    if (!filePath || !agentId) return;
     try {
-      await this.api.releaseLock(lockId);
+      await this.api.releaseLock({ file_path: filePath, agent_id: agentId });
       await this.refresh();
     } catch (e) {
       console.error('[FileLockViewer] release failed:', e);
@@ -710,6 +787,183 @@ class PairingDialog {
   }
 }
 
+class MCPLinkDialog {
+  constructor(onSubmit, onProbe) {
+    this.overlay = document.getElementById('mcpLinkModal');
+    this.closeBtn = document.getElementById('mcpLinkModalClose');
+    this.cancelBtn = document.getElementById('mcpLinkCancelBtn');
+    this.connectBtn = document.getElementById('mcpLinkConnectBtn');
+    this.error = document.getElementById('mcpLinkError');
+    this.result = document.getElementById('mcpLinkResult');
+    this.onSubmit = onSubmit;
+    this.onProbe = onProbe;
+    this.fields = {
+      router: document.getElementById('mcpRouterUrlInput'),
+      aName: document.getElementById('mcpAgentAName'),
+      aId: document.getElementById('mcpAgentAId'),
+      aEndpoint: document.getElementById('mcpAgentAEndpoint'),
+      bName: document.getElementById('mcpAgentBName'),
+      bId: document.getElementById('mcpAgentBId'),
+      bEndpoint: document.getElementById('mcpAgentBEndpoint'),
+    };
+    this.testButtons = {
+      router: document.getElementById('mcpTestRouterBtn'),
+      agentA: document.getElementById('mcpTestAgentABtn'),
+      agentB: document.getElementById('mcpTestAgentBBtn'),
+    };
+    this.testStatus = {
+      router: document.getElementById('mcpRouterTestStatus'),
+      agentA: document.getElementById('mcpAgentATestStatus'),
+      agentB: document.getElementById('mcpAgentBTestStatus'),
+    };
+    this._bind();
+  }
+
+  _bind() {
+    if (this.connectBtn) this.connectBtn.addEventListener('click', () => this._submit());
+    if (this.cancelBtn) this.cancelBtn.addEventListener('click', () => this.hide());
+    if (this.closeBtn) this.closeBtn.addEventListener('click', () => this.hide());
+    if (this.testButtons.router) this.testButtons.router.addEventListener('click', () => this._probe('router', this.fields.router?.value.trim(), 'Router'));
+    if (this.testButtons.agentA) this.testButtons.agentA.addEventListener('click', () => this._probe('agentA', this.fields.aEndpoint?.value.trim(), this.fields.aId?.value.trim() || 'Agent A'));
+    if (this.testButtons.agentB) this.testButtons.agentB.addEventListener('click', () => this._probe('agentB', this.fields.bEndpoint?.value.trim(), this.fields.bId?.value.trim() || 'Agent B'));
+    if (this.overlay) {
+      this.overlay.addEventListener('click', (e) => {
+        if (e.target === this.overlay) this.hide();
+      });
+    }
+  }
+
+  _setProbeStatus(kind, state, text) {
+    const statusEl = this.testStatus[kind];
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.classList.remove('is-checking', 'is-ok', 'is-fail');
+    if (state === 'checking') statusEl.classList.add('is-checking');
+    if (state === 'ok') statusEl.classList.add('is-ok');
+    if (state === 'fail') statusEl.classList.add('is-fail');
+  }
+
+  async _probe(kind, target, label) {
+    if (!target) {
+      this._setProbeStatus(kind, 'fail', 'Missing endpoint');
+      return;
+    }
+    const btn = this.testButtons[kind];
+    if (btn) btn.disabled = true;
+    this._setProbeStatus(kind, 'checking', 'Checking...');
+    try {
+      const probe = this.onProbe ? await this.onProbe(kind, target) : null;
+      const from = probe?.source === 'proxy' ? 'proxy' : 'direct';
+      if (probe?.ok) {
+        this._setProbeStatus(kind, 'ok', `${label}: OK (${probe.status || 200}, ${from})`);
+      } else {
+        this._setProbeStatus(kind, 'fail', `${label}: Fail (${probe?.status || 0}, ${from})`);
+      }
+    } catch (e) {
+      this._setProbeStatus(kind, 'fail', `${label}: ${e.message || e}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  show(defaults = {}) {
+    this.clearError();
+    this.setResult('Not linked');
+    this._setProbeStatus('router', 'idle', 'Not tested');
+    this._setProbeStatus('agentA', 'idle', 'Not tested');
+    this._setProbeStatus('agentB', 'idle', 'Not tested');
+    if (this.fields.router) {
+      this.fields.router.value = defaults.routerUrl || this.fields.router.value || location.origin.replace(/:\d+$/, ':8420');
+    }
+    if (this.fields.aName && defaults.agentA?.display_name) this.fields.aName.value = defaults.agentA.display_name;
+    if (this.fields.aId && defaults.agentA?.agent_id) this.fields.aId.value = defaults.agentA.agent_id;
+    if (this.fields.aEndpoint && defaults.agentA?.endpoint) this.fields.aEndpoint.value = defaults.agentA.endpoint;
+    if (this.fields.bName && defaults.agentB?.display_name) this.fields.bName.value = defaults.agentB.display_name;
+    if (this.fields.bId && defaults.agentB?.agent_id) this.fields.bId.value = defaults.agentB.agent_id;
+    if (this.fields.bEndpoint && defaults.agentB?.endpoint) this.fields.bEndpoint.value = defaults.agentB.endpoint;
+    if (this.overlay) this.overlay.classList.remove('hidden');
+    setTimeout(() => this.fields.aEndpoint?.focus(), 80);
+  }
+
+  hide() {
+    if (this.overlay) this.overlay.classList.add('hidden');
+  }
+
+  setResult(text) {
+    if (this.result) this.result.textContent = text;
+  }
+
+  showError(msg) {
+    if (this.error) {
+      this.error.textContent = msg;
+      this.error.classList.remove('hidden');
+    }
+  }
+
+  clearError() {
+    if (this.error) this.error.classList.add('hidden');
+  }
+
+  _submit() {
+    this.clearError();
+    const payload = {
+      routerUrl: this.fields.router?.value.trim(),
+      agentA: {
+        display_name: this.fields.aName?.value.trim(),
+        agent_id: this.fields.aId?.value.trim(),
+        endpoint: this.fields.aEndpoint?.value.trim(),
+      },
+      agentB: {
+        display_name: this.fields.bName?.value.trim(),
+        agent_id: this.fields.bId?.value.trim(),
+        endpoint: this.fields.bEndpoint?.value.trim(),
+      },
+    };
+    if (!payload.routerUrl || !payload.agentA.agent_id || !payload.agentA.endpoint || !payload.agentB.agent_id || !payload.agentB.endpoint) {
+      this.showError('Router URL、两端 Agent ID 与 Endpoint 为必填。');
+      return;
+    }
+    if (this.onSubmit) this.onSubmit(payload);
+  }
+}
+
+class BackendLogViewer {
+  constructor(api) {
+    this.api = api;
+    this.output = document.getElementById('backendLogOutput');
+    this.refreshBtn = document.getElementById('logsRefreshBtn');
+    this._timer = null;
+    if (this.refreshBtn) {
+      this.refreshBtn.addEventListener('click', () => this.refresh());
+    }
+  }
+
+  start() {
+    this.stop();
+    this.refresh();
+    this._timer = setInterval(() => this.refresh(), 10000);
+  }
+
+  stop() {
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+  }
+
+  async refresh() {
+    if (!this.output) return;
+    try {
+      const data = await this.api.logs(300);
+      const logs = Array.isArray(data?.logs) ? data.logs : [];
+      this.output.textContent = logs.length > 0 ? logs.join('\n') : 'No backend logs available.';
+      this.output.scrollTop = this.output.scrollHeight;
+    } catch (e) {
+      this.output.textContent = `Failed to load logs: ${e.message || e}`;
+    }
+  }
+}
+
 /* ----------------------------------------------------------
    AgentPanel - Left sidebar conversation tabs
    ---------------------------------------------------------- */
@@ -819,6 +1073,7 @@ class GroupChatManager {
     this.api = api;
     this.topics = [];
     this.currentTopicId = null;
+    this._sessionId = null;
     this.topicMessages = new Map();
     this.agents = [];
 
@@ -882,8 +1137,13 @@ class GroupChatManager {
   }
 
   async refresh() {
+    if (!this._sessionId) {
+      this.topics = [];
+      this.renderTopicList();
+      return;
+    }
     try {
-      const res = await this.api.topics();
+      const res = await this.api.topics(this._sessionId);
       this.topics = Array.isArray(res) ? res : res.topics || [];
     } catch {
       this.topics = [];
@@ -927,8 +1187,12 @@ class GroupChatManager {
   }
 
   async createTopic(title) {
+    if (!this._sessionId) return;
     try {
-      const res = await this.api.createTopic({ title });
+      const res = await this.api.createTopic(this._sessionId, {
+        title,
+        created_by: localStorage.getItem('clawlink_user_name') || 'user',
+      });
       await this.refresh();
       if (res && res.id) this.switchTopic(res.id);
     } catch (e) {
@@ -937,6 +1201,7 @@ class GroupChatManager {
   }
 
   async switchTopic(topicId) {
+    if (!this._sessionId) return;
     this.currentTopicId = topicId;
     const topic = this.topics.find(t => t.id === topicId);
     if (this.titleEl) this.titleEl.textContent = topic ? (topic.title || topic.name) : 'Unknown';
@@ -945,7 +1210,7 @@ class GroupChatManager {
     this.renderTopicList();
 
     try {
-      const msgs = await this.api.topicMessages(topicId);
+      const msgs = await this.api.topicMessages(this._sessionId, topicId);
       const list = Array.isArray(msgs) ? msgs : msgs.messages || [];
       this.topicMessages.set(topicId, list);
     } catch {
@@ -1123,7 +1388,7 @@ class GroupChatManager {
     this.addMessage(this.currentTopicId, msg);
 
     try {
-      await this.api.sendTopicMsg(this.currentTopicId, { content: text });
+      await this.api.sendTopicMsg(this._sessionId, this.currentTopicId, { content: text });
     } catch (e) {
       console.error('[GroupChat] send failed:', e);
     }
@@ -1183,19 +1448,96 @@ class App {
     this.strictnessControl = new StrictnessControl(this.api);
     this.groupChat = new GroupChatManager(this.api);
     this.pairingDialog = new PairingDialog((code) => this._handlePair(code));
+    this.mcpLinkDialog = new MCPLinkDialog(
+      (payload) => this._handleManualLink(payload),
+      async (_kind, target) => this.api.probeHealth(target)
+    );
+    this.logViewer = new BackendLogViewer(this.api);
 
+    this._agentCacheKey = 'clawlink_known_agents';
+    this._linkDraftKey = 'clawlink_link_draft';
     this._connectionOk = false;
     this._heartbeatInterval = null;
     this._queueInterval = null;
     this._agents = [];
+    this._linkedPair = null;
   }
 
   async init() {
     this._bindUI();
     this._bindConversationManager();
     this._bindWS();
+    await this._syncRouterConfig();
     this._startHeartbeat();
+    this.logViewer.start();
     await this._loadInitialData();
+    this._updateFloatingConnectionCard();
+  }
+
+  async _syncRouterConfig() {
+    try {
+      const conf = await this.api.getRouterUrl();
+      const routerUrl = conf?.router_url || '';
+      if (routerUrl) {
+        localStorage.setItem('clawlink_router_url', routerUrl);
+        const settingsInput = document.getElementById('routerUrlInput');
+        const linkInput = document.getElementById('mcpRouterUrlInput');
+        if (settingsInput) settingsInput.value = routerUrl;
+        if (linkInput) linkInput.value = routerUrl;
+      }
+    } catch {
+      // ignore config sync failures
+    }
+  }
+
+  _readJsonCache(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  _writeJsonCache(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // ignore cache write failures
+    }
+  }
+
+  _getCachedAgents() {
+    const cached = this._readJsonCache(this._agentCacheKey, []);
+    return Array.isArray(cached) ? cached.filter((a) => a?.agent_id || a?.id) : [];
+  }
+
+  _cacheAgents(agents = []) {
+    const base = this._getCachedAgents();
+    const merged = new Map();
+    [...base, ...agents].forEach((agent) => {
+      const agentId = agent?.agent_id || agent?.id;
+      if (!agentId) return;
+      const normalized = {
+        ...agent,
+        agent_id: agentId,
+        id: agent?.id || agentId,
+        display_name: agent?.display_name || agent?.name || agentId,
+      };
+      merged.set(agentId, normalized);
+    });
+    this._writeJsonCache(this._agentCacheKey, [...merged.values()].slice(-100));
+  }
+
+  _getLinkDefaults() {
+    const draft = this._readJsonCache(this._linkDraftKey, {});
+    return {
+      routerUrl: localStorage.getItem('clawlink_router_url') || draft.routerUrl || '',
+      agentA: draft.agentA || {},
+      agentB: draft.agentB || {},
+    };
   }
 
   _bindUI() {
@@ -1205,34 +1547,52 @@ class App {
     });
 
     // Panel collapse
-    const leftPanel = document.getElementById('leftPanel');
-    const rightPanel = document.getElementById('rightPanel');
     const layout = document.getElementById('appLayout');
     const collapseLeftBtn = document.getElementById('collapseLeftBtn');
     const collapseRightBtn = document.getElementById('collapseRightBtn');
+    const reopenLeftBtn = document.getElementById('reopenLeftBtn');
+    const reopenRightBtn = document.getElementById('reopenRightBtn');
 
-    if (collapseLeftBtn) {
-      collapseLeftBtn.addEventListener('click', () => {
-        layout.classList.toggle('left-collapsed');
+    const syncCollapseIcons = () => {
+      const leftCollapsed = layout.classList.contains('left-collapsed');
+      const rightCollapsed = layout.classList.contains('right-collapsed');
+
+      if (collapseLeftBtn) {
         const svg = collapseLeftBtn.querySelector('svg polyline');
-        if (layout.classList.contains('left-collapsed')) {
-          svg.setAttribute('points', '9 18 15 12 9 6');
-        } else {
-          svg.setAttribute('points', '15 18 9 12 15 6');
-        }
-      });
-    }
-    if (collapseRightBtn) {
-      collapseRightBtn.addEventListener('click', () => {
-        layout.classList.toggle('right-collapsed');
+        if (svg) svg.setAttribute('points', leftCollapsed ? '9 18 15 12 9 6' : '15 18 9 12 15 6');
+      }
+      if (collapseRightBtn) {
         const svg = collapseRightBtn.querySelector('svg polyline');
-        if (layout.classList.contains('right-collapsed')) {
-          svg.setAttribute('points', '15 18 9 12 15 6');
-        } else {
-          svg.setAttribute('points', '9 18 15 12 9 6');
-        }
-      });
-    }
+        if (svg) svg.setAttribute('points', rightCollapsed ? '15 18 9 12 15 6' : '9 18 15 12 9 6');
+      }
+
+      reopenLeftBtn?.classList.toggle('hidden', !leftCollapsed);
+      reopenRightBtn?.classList.toggle('hidden', !rightCollapsed);
+      reopenLeftBtn?.classList.toggle('force-visible', leftCollapsed);
+      reopenRightBtn?.classList.toggle('force-visible', rightCollapsed);
+    };
+
+    collapseLeftBtn?.addEventListener('click', () => {
+      layout.classList.toggle('left-collapsed');
+      syncCollapseIcons();
+    });
+
+    collapseRightBtn?.addEventListener('click', () => {
+      layout.classList.toggle('right-collapsed');
+      syncCollapseIcons();
+    });
+
+    reopenLeftBtn?.addEventListener('click', () => {
+      layout.classList.remove('left-collapsed');
+      syncCollapseIcons();
+    });
+
+    reopenRightBtn?.addEventListener('click', () => {
+      layout.classList.remove('right-collapsed');
+      syncCollapseIcons();
+    });
+
+    syncCollapseIcons();
 
     // Right panel tabs (solo)
     document.querySelectorAll('#soloRightPanel .panel-tab').forEach(tab => {
@@ -1244,6 +1604,7 @@ class App {
         document.getElementById(`${target}TabContent`).classList.add('active');
 
         if (target === 'locks') this.lockViewer.refresh();
+        if (target === 'logs') this.logViewer.refresh();
       });
     });
 
@@ -1262,6 +1623,21 @@ class App {
     document.getElementById('newConversationBtn')?.addEventListener('click', () => {
       this.pairingDialog.show();
     });
+
+    const openLinkDialog = () => {
+      this.mcpLinkDialog.show(this._getLinkDefaults());
+    };
+    document.getElementById('linkAgentsBtn')?.addEventListener('click', openLinkDialog);
+    document.getElementById('quickLinkBtn')?.addEventListener('click', openLinkDialog);
+
+    const agentCountBadge = document.getElementById('agentCountBadge');
+    const connectionFloating = document.getElementById('connectionFloating');
+    agentCountBadge?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._toggleConnectionFloating();
+    });
+    connectionFloating?.addEventListener('click', (e) => e.stopPropagation());
+    document.addEventListener('click', () => this._toggleConnectionFloating(false));
 
     // Solo chat input
     const soloInput = document.getElementById('soloMessageInput');
@@ -1302,11 +1678,20 @@ class App {
     if (settingsModal) settingsModal.addEventListener('click', (e) => {
       if (e.target === settingsModal) closeSettings();
     });
-    if (settingsSaveBtn) settingsSaveBtn.addEventListener('click', () => {
+    if (settingsSaveBtn) settingsSaveBtn.addEventListener('click', async () => {
       // Save settings to localStorage
       const routerUrl = document.getElementById('routerUrlInput')?.value;
       const userName = document.getElementById('userNameInput')?.value;
-      if (routerUrl !== undefined) localStorage.setItem('clawlink_router_url', routerUrl);
+      if (routerUrl !== undefined) {
+        localStorage.setItem('clawlink_router_url', routerUrl);
+        const mcpRouterInput = document.getElementById('mcpRouterUrlInput');
+        if (mcpRouterInput) mcpRouterInput.value = routerUrl;
+        try {
+          await this.api.setRouterUrl(routerUrl);
+        } catch (e) {
+          console.error('[App] failed to update router target:', e);
+        }
+      }
       if (userName !== undefined) localStorage.setItem('clawlink_user_name', userName);
       closeSettings();
     });
@@ -1314,7 +1699,11 @@ class App {
     // Load saved settings
     const savedUrl = localStorage.getItem('clawlink_router_url');
     const savedName = localStorage.getItem('clawlink_user_name');
-    if (savedUrl) document.getElementById('routerUrlInput').value = savedUrl;
+    if (savedUrl) {
+      document.getElementById('routerUrlInput').value = savedUrl;
+      const mcpRouterInput = document.getElementById('mcpRouterUrlInput');
+      if (mcpRouterInput) mcpRouterInput.value = savedUrl;
+    }
     if (savedName) document.getElementById('userNameInput').value = savedName;
 
     // Conversation search
@@ -1340,11 +1729,13 @@ class App {
       this.ws.connect(agentId);
       // Refresh score
       this._refreshScore(agentId);
+      this._updateConnectionPeer();
     };
 
     this.conversationManager.onUpdate = () => {
       this.agentPanel.render();
       this._updateAgentCount();
+      this._updateConnectionPeer();
     };
   }
 
@@ -1394,12 +1785,18 @@ class App {
       groupRightPanel?.classList.remove('hidden');
       soloChatContainer?.classList.add('hidden');
       groupChatContainer?.classList.remove('hidden');
+      this.groupChat.setSession(this._resolveCurrentSessionId());
       this.groupChat.refresh();
     }
   }
 
   switchConversation(agentId) {
     this.conversationManager.switchTo(agentId);
+    this.groupChat.setSession(agentId);
+  }
+
+  _resolveCurrentSessionId() {
+    return this.conversationManager.activeId || this._linkedPair?.sessionId || null;
   }
 
   removeConversation(agentId) {
@@ -1433,8 +1830,9 @@ class App {
     try {
       const res = await this.api.sendMessage(activeId, { content: text });
       // Check for queue info
-      if (res && res.queue_position) {
-        this.chatRenderer.renderQueueBanner(res.queue_position);
+      const queuePosition = res?.position || res?.queue_position || 0;
+      if (queuePosition > 0) {
+        this.chatRenderer.renderQueueBanner(queuePosition);
         this._startQueuePolling(activeId);
       }
     } catch (e) {
@@ -1499,6 +1897,7 @@ class App {
         avatar_color: agent.avatar_color,
         online: true,
       });
+      this._cacheAgents([agent]);
       this.conversationManager.switchTo(id);
     } catch (e) {
       this.pairingDialog.showError('Failed to connect. Check the code and try again.');
@@ -1506,11 +1905,91 @@ class App {
     }
   }
 
+  async _handleManualLink(payload) {
+    const routerUrl = payload.routerUrl.replace(/\/$/, '');
+    localStorage.setItem('clawlink_router_url', routerUrl);
+
+    const registerOne = async (agent) => {
+      return this.api.registerAgent({
+        agent_id: agent.agent_id,
+        display_name: agent.display_name || agent.agent_id,
+        endpoint: agent.endpoint,
+        agent_type: 'openclaw',
+      });
+    };
+
+    try {
+      this.mcpLinkDialog.setResult('Prechecking endpoints...');
+      const [routerProbe, aProbe, bProbe] = await Promise.all([
+        this.api.probeHealth(routerUrl),
+        this.api.probeHealth(payload.agentA.endpoint),
+        this.api.probeHealth(payload.agentB.endpoint),
+      ]);
+
+      const probeErrors = [
+        { name: 'Router', probe: routerProbe },
+        { name: payload.agentA.agent_id || 'Agent A', probe: aProbe },
+        { name: payload.agentB.agent_id || 'Agent B', probe: bProbe },
+      ].filter(item => !item.probe?.ok);
+
+      if (probeErrors.length > 0) {
+        const detail = probeErrors
+          .map(item => `${item.name} /health 失败 (${item.probe?.status || 0}) ${item.probe?.error || item.probe?.body || ''}`)
+          .join('；');
+        throw new Error(detail);
+      }
+
+      this.mcpLinkDialog.setResult('Switching router target...');
+      await this.api.setRouterUrl(routerUrl);
+
+      this.mcpLinkDialog.setResult('Registering agents...');
+      await Promise.all([registerOne(payload.agentA), registerOne(payload.agentB)]);
+
+      const created = await this.api.createSession({
+        chat_type: 'solo',
+        mode: '|',
+        agents: [payload.agentA.agent_id, payload.agentB.agent_id],
+        strictness: 50,
+        pass_threshold: 70,
+        max_iterations: 3,
+      });
+
+      const sessionId = created.session_id || created.id;
+      this._linkedPair = {
+        sessionId,
+        a: payload.agentA,
+        b: payload.agentB,
+      };
+
+      this.conversationManager.add({
+        id: sessionId,
+        display_name: `${payload.agentA.display_name || payload.agentA.agent_id} ↔ ${payload.agentB.display_name || payload.agentB.agent_id}`,
+        avatar_color: '#6366f1',
+        online: true,
+      });
+      this.conversationManager.switchTo(sessionId);
+      this._writeJsonCache(this._linkDraftKey, {
+        routerUrl,
+        agentA: payload.agentA,
+        agentB: payload.agentB,
+      });
+      this._cacheAgents([payload.agentA, payload.agentB]);
+      this.mcpLinkDialog.setResult(`Linked: ${payload.agentA.agent_id} ↔ ${payload.agentB.agent_id} (session: ${sessionId})`);
+      this.mcpLinkDialog.hide();
+      this._updateConnectionPeer();
+      await this._loadInitialData();
+    } catch (e) {
+      this.mcpLinkDialog.showError(`Link failed: ${e.message || e}`);
+      console.error('[App] manual link failed:', e);
+    }
+  }
+
   async _loadInitialData() {
-    // Try to load agents
+    // 优先使用 router 当前已连接 agents 初始化
     try {
       const agents = await this.api.agents();
       this._agents = Array.isArray(agents) ? agents : agents.agents || [];
+      this._cacheAgents(this._agents);
       this._agents.forEach(a => {
         this.conversationManager.add(a);
       });
@@ -1518,15 +1997,26 @@ class App {
       this.groupChat.setAgents(this._agents);
       this._updateAgentCount();
       this._updateConnectionStatus(true);
+      this._updateConnectionPeer();
 
-      // Auto-select first conversation
-      if (this._agents.length > 0) {
+      // Auto-select active linked session first, fallback to first agent
+      if (this._linkedPair?.sessionId) {
+        this.conversationManager.switchTo(this._linkedPair.sessionId);
+      } else if (this._agents.length > 0) {
         const firstId = this._agents[0].id || this._agents[0].agent_id;
         if (firstId) this.conversationManager.switchTo(firstId);
       }
+      return;
     } catch {
-      // Router not available
+      // Router 不可用时回退到本地缓存
+      const cachedAgents = this._getCachedAgents();
+      this._agents = cachedAgents;
+      cachedAgents.forEach((a) => this.conversationManager.add(a));
+      this.agentPanel.render();
+      this.groupChat.setAgents(this._agents);
+      this._updateAgentCount();
       this._updateConnectionStatus(false);
+      this._updateConnectionPeer();
     }
   }
 
@@ -1551,7 +2041,7 @@ class App {
     const strictness = parseInt(document.getElementById('strictnessSlider')?.value || '50', 10);
 
     try {
-      await this.api.teach(activeId, { mode, strictness });
+      await this.api.teach(activeId);
       const msg = {
         content: `Teaching started (mode: ${mode}, strictness: ${strictness})`,
         sender: 'System',
@@ -1598,8 +2088,9 @@ class App {
     this._queueInterval = setInterval(async () => {
       try {
         const q = await this.api.queue(sessionId);
-        if (q && q.position > 0) {
-          this.chatRenderer.renderQueueBanner(q.position);
+        const position = q?.items?.[0]?.position || 0;
+        if (position > 0) {
+          this.chatRenderer.renderQueueBanner(position);
         } else {
           this.chatRenderer.renderQueueBanner(0);
           this._stopQueuePolling();
@@ -1619,13 +2110,84 @@ class App {
 
   _updateConnectionStatus(connected) {
     this._connectionOk = connected;
-    const dot = document.querySelector('#connectionStatus .status-dot');
-    const label = document.querySelector('#connectionStatus .status-label');
+    const status = document.getElementById('connectionStatus');
+    const dot = status?.querySelector('.status-dot');
+    const label = status?.querySelector('.status-label');
     if (dot) {
       dot.className = `status-dot status-dot--${connected ? 'connected' : 'disconnected'}`;
     }
     if (label) {
       label.textContent = connected ? 'Online' : 'Offline';
+    }
+    if (status) {
+      status.title = connected ? 'Router connected' : 'Router disconnected';
+    }
+    this._updateFloatingConnectionCard();
+  }
+
+  _updateConnectionPeer() {
+    const el = document.getElementById('connectionPeer');
+    if (el) {
+      const pair = this._resolveConnectionPair();
+      if (pair[0] !== 'Not connected' || pair[1] !== 'Not connected') {
+        el.textContent = `${pair[0]} ↔ ${pair[1]}`;
+      } else {
+        el.textContent = 'No linked agents';
+      }
+    }
+    this._updateFloatingConnectionCard();
+  }
+
+  _resolveConnectionPair() {
+    if (this._linkedPair) {
+      const a = this._linkedPair.a.display_name || this._linkedPair.a.agent_id || 'Not connected';
+      const b = this._linkedPair.b.display_name || this._linkedPair.b.agent_id || 'Not connected';
+      return [a, b];
+    }
+
+    const names = this._agents
+      .map((a) => a.display_name || a.agent_id || a.id)
+      .filter(Boolean)
+      .slice(0, 2);
+
+    if (names.length === 2) return names;
+    if (names.length === 1) return [names[0], 'Not connected'];
+
+    const active = this.conversationManager.getActive();
+    if (active?.agent?.display_name) {
+      return [active.agent.display_name, 'Not connected'];
+    }
+
+    return ['Not connected', 'Not connected'];
+  }
+
+  _toggleConnectionFloating(force) {
+    const panel = document.getElementById('connectionFloating');
+    const trigger = document.getElementById('agentCountBadge');
+    if (!panel || !trigger) return;
+
+    const shouldShow = typeof force === 'boolean' ? force : panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', !shouldShow);
+    trigger.classList.toggle('is-active', shouldShow);
+    trigger.setAttribute('aria-expanded', shouldShow ? 'true' : 'false');
+  }
+
+  _updateFloatingConnectionCard() {
+    const peerA = document.getElementById('floatingPeerA');
+    const peerB = document.getElementById('floatingPeerB');
+    const routerStatus = document.getElementById('floatingRouterStatus');
+    const routerRow = routerStatus?.closest('.connection-floating__row--status');
+    const pair = this._resolveConnectionPair();
+
+    if (peerA) peerA.textContent = pair[0];
+    if (peerB) peerB.textContent = pair[1];
+
+    if (routerStatus) {
+      routerStatus.textContent = this._connectionOk ? 'Online' : 'Offline';
+    }
+    if (routerRow) {
+      routerRow.classList.toggle('online', !!this._connectionOk);
+      routerRow.classList.toggle('offline', !this._connectionOk);
     }
   }
 
